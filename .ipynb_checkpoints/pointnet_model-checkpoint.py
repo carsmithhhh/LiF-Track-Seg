@@ -36,7 +36,9 @@ class MaskedMiniPointNet(nn.Module):
     def forward(self, points, mask) -> torch.Tensor:
         # input points: (B, N, C)
         # mask: (B, 1, N)
+        #PIPER ADD
         visible_mask = mask.squeeze(1).bool()
+        # PIPER ADD chat seems to think that this line should go after the norm
         feature = points.transpose(2, 1)  # (B, C, N)
         out0 = self.conv1(feature)
 

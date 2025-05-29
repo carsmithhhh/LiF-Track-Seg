@@ -165,73 +165,95 @@ class TransformerEncoderLayer(nn.Module):
         src = self.norm_ffn(ffn + shortcut)
         return src
 
-class VisionTransformer(nn.Module):
-    """
-    Vision Transformer (ViT) implementation.
-    """
-    def __init__(self, img_size=32, patch_size=8, in_channels=3,
-                 embed_dim=128, num_layers=6, num_heads=4,
-                 dim_feedforward=256, num_classes=10, dropout=0.1):
+class VisionTransformer3D(nn.Module):
+    def __init__(self, input_dim=128, num_layers=6, num_heads=4,
+                 dim_feedforward=1024, dropout=0.1):
         """
-        Inputs:
-         - img_size: Size of input image (assumed square).
-         - patch_size: Size of each patch (assumed square).
-         - in_channels: Number of image channels.
-         - embed_dim: Embedding dimension for each patch.
-         - num_layers: Number of Transformer encoder layers.
-         - num_heads: Number of attention heads.
-         - dim_feedforward: Hidden size of feedforward network.
-         - num_classes: Number of classification labels.
-         - dropout: Dropout probability.
+        Transformer encoder for 3D patch sequences (no classification head).
         """
         super().__init__()
-        self.num_classes = num_classes
-        # self.patch_embed = PatchEmbedding(img_size, patch_size, in_channels, embed_dim)
-        # self.positional_encoding = PositionalEncoding(embed_dim, dropout=dropout)
-
-        encoder_layer = TransformerEncoderLayer(embed_dim, num_heads, dim_feedforward, dropout)
-        self.transformer = TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        # Final classification layer to predict class scores from pooled token.
-        self.head = nn.Linear(embed_dim, num_classes)
+        encoder_layer = TransformerEncoderLayer(
+            input_dim=input_dim,
+            num_heads=num_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
+        )
+        self.encoder = nn.ModuleList([encoder_layer for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(input_dim)
 
         self.apply(self._init_weights)
 
-
     def _init_weights(self, module):
-        """
-        Initialize the weights of the network.
-        """
         if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=0.02)
-            if isinstance(module, nn.Linear) and module.bias is not None:
-                module.bias.data.zero_()
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
         elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
 
-    def forward(self, x):
+    def forward(self, embeddings):
         """
-        Forward pass of Vision Transformer.
-
-        Inputs:
-         - x: Input image tensor of shape (N, C, H, W)
+        Args:
+            concatenation of: 
+            patch_embed: (B, N, D) patch embeddings
+            pos_embed:   (B, N, D) positional embeddings
 
         Returns:
-         - logits: Output classification logits of shape (N, num_classes)
+            out: (B, N, D) context-enriched features
         """
-        N = x.size(0)
-        logits = torch.zeros(N, self.num_classes, device=x.device)
+        # x = patch_embed + pos_embed  # (B, N, D)
+        x = embeddings
         
-        patches = self.patch_embed(x)
-        patches = self.positional_encoding(patches)
+        for layer in self.encoder:
+            x = layer(x)
 
-        embeddings = self.transformer(patches) # (3, 16, 128) --> want to pool over class dim, 16?
-        avg_embeddings = torch.mean(embeddings, dim=1) # (3, 128)
-        
-        logits = self.head(avg_embeddings)
+        x = self.norm(x)
+        return x
 
-        return logits
+
+class TransformerDecoderLayer(nn.Module):
+    def __init__(self, embed_dim, num_heads=4, mlp_ratio=4.0, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = MultiHeadAttention(embed_dim, num_heads, dropout)
+
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn = FeedForwardNetwork(embed_dim, int(embed_dim * mlp_ratio), dropout)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+class Decoder(nn.Module):
+    def __init__(self, embed_dim, hidden_dim=256, num_layers=2, num_heads=4, dropout=0.1, output_dim=3125):
+        """
+        Args:
+            embed_dim: Input dim from encoder (e.g. 256)
+            decoder_dim: Decoder hidden dim (e.g. 128 or 256)
+            output_dim: Output dim per patch (e.g., 3 for coords, 4 for (x,y,z,intensity))
+        """
+        super().__init__()
+
+        self.proj = nn.Linear(embed_dim, hidden_dim, bias=True)
+        self.blocks = nn.ModuleList([
+            TransformerDecoderLayer(hidden_dim, num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        self.norm = nn.LayerNorm(hidden_dim)
+
+        # Final projection to predict patch output
+        self.head = nn.Linear(hidden_dim, output_dim) 
+
+    def forward(self, x):
+        x = self.proj(x)
+        for blk in self.blocks:
+            x = blk(x)
+        x = self.norm(x)
+        x = self.head(x)  # (B, N, output_dim)
+        return x
+
 
 
   
