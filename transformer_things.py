@@ -166,7 +166,7 @@ class TransformerEncoderLayer(nn.Module):
         return src
 
 class VisionTransformer3D(nn.Module):
-    def __init__(self, input_dim=128, num_layers=6, num_heads=4,
+    def __init__(self, input_dim=384, num_layers=6, num_heads=4,
                  dim_feedforward=1024, dropout=0.1):
         """
         Transformer encoder for 3D patch sequences (no classification head).
@@ -230,8 +230,8 @@ class Decoder(nn.Module):
     def __init__(self, embed_dim, hidden_dim=256, num_layers=2, num_heads=4, dropout=0.1, output_dim=3125):
         """
         Args:
-            embed_dim: Input dim from encoder (e.g. 256)
-            decoder_dim: Decoder hidden dim (e.g. 128 or 256)
+            embed_dim: Input dim from encoder
+            decoder_dim: Decoder hidden dim
             output_dim: Output dim per patch (e.g., 3 for coords, 4 for (x,y,z,intensity))
         """
         super().__init__()

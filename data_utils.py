@@ -5,36 +5,96 @@ from torch.utils.data import Dataset
 import numpy as np
 
 # cubes is a list of our 3d images
-class CubeDataset(torch.utils.data.Dataset): # returns dataset on cpu
-  def __init__(self, cubes):
-    self.cubes = cubes
-    np.random.seed(42)
+class CubeDataset(torch.utils.data.Dataset):
+    def __init__(self, cubes):
+        """
+        cubes: list of shape (N, Z, Y, X) # currently (N, 5, 250, 250)
+        """
+        self.cubes = cubes
 
-  def __len__(self):
-    return len(self.cubes)
+    def __len__(self):
+        return len(self.cubes)
 
-  def __getitem__(self, idx):
-    return self.cubes[idx]
+    def __getitem__(self, idx):
+        # Return each cube as a float32 torch.Tensor
+        return torch.tensor(self.cubes[idx], dtype=torch.float32)
 
 
-def random_masking(x, mask_ratio=0.6):
+# def random_masking(x, mask_ratio=0.6):
+#     """
+#     x: (B, N, D) patch embeddings
+#     Returns:
+#         visible_x: (B, N_vis, D)
+#         mask_indices: (B, N_masked) indices of masked patches
+#         unmask_indices: (B, N_vis) indices of visible patches
+#     """
+#     B, N, _ = x.shape
+#     N_vis = int(N * (1 - mask_ratio))
+
+#     noise = torch.rand(B, N, device=x.device)  # (B, N)
+#     ids_sorted = torch.argsort(noise, dim=1)   # ascending order
+#     ids_keep = ids_sorted[:, :N_vis]
+#     ids_mask = ids_sorted[:, N_vis:]
+
+#     # Gather visible tokens
+#     batch_idx = torch.arange(B).unsqueeze(-1).to(x.device)  # (B, 1)
+#     x_visible = x[batch_idx, ids_keep]
+
+#     return x_visible, ids_keep, ids_mask
+
+def random_masking(x, grid_shape=(5, 10, 10), patch_block=(1, 5, 5), mask_per_block=10, generator=None):
     """
-    x: (B, N, D) patch embeddings
+    Stratified masking over a voxel patch grid.
+
+    Args:
+        x: (B, N, D) input patch embeddings
+        grid_shape: (Z, Y, X) shape of patch grid
+        patch_block: block size (Zb, Yb, Xb) for stratification
+        mask_per_block: number of patches to mask in each block
+        generator: optional torch.Generator for reproducibility
+
     Returns:
-        visible_x: (B, N_vis, D)
-        mask_indices: (B, N_masked) indices of masked patches
-        unmask_indices: (B, N_vis) indices of visible patches
+        x_visible: (B, N_vis, D)
+        ids_keep: (B, N_vis)
+        ids_mask: (B, N_masked)
     """
     B, N, _ = x.shape
-    N_vis = int(N * (1 - mask_ratio))
+    Z, Y, X = grid_shape
+    Zb, Yb, Xb = patch_block
+    assert Z % Zb == 0 and Y % Yb == 0 and X % Xb == 0, "Grid must be divisible by block size"
+    assert N == Z * Y * X, "Grid shape doesn't match input"
 
-    noise = torch.rand(B, N, device=x.device)  # (B, N)
-    ids_sorted = torch.argsort(noise, dim=1)   # ascending order
-    ids_keep = ids_sorted[:, :N_vis]
-    ids_mask = ids_sorted[:, N_vis:]
+    # Create grid of patch indices
+    patch_indices = torch.arange(N, device=x.device).reshape(Z, Y, X)
+    ids_mask = []
+
+    # Iterate over blocks
+    for zb in range(0, Z, Zb):
+        for yb in range(0, Y, Yb):
+            for xb in range(0, X, Xb):
+                block = patch_indices[zb:zb+Zb, yb:yb+Yb, xb:xb+Xb].flatten()
+                if mask_per_block >= block.numel():
+                    selected = block  # optionally raise error here
+                else:
+                    selected = block[torch.multinomial(
+                        torch.ones(block.shape[0], device=x.device),
+                        num_samples=mask_per_block,
+                        replacement=False,
+                        generator=generator
+                    )]
+                ids_mask.append(selected)
+
+    ids_mask = torch.cat(ids_mask, dim=0)  # (num_blocks * mask_per_block,)
+    ids_mask = ids_mask.unsqueeze(0).expand(B, -1)  # (B, N_mask)
+
+    # Compute mask
+    all_ids = torch.arange(N, device=x.device).unsqueeze(0).expand(B, -1)  # (B, N)
+    mask = torch.ones_like(all_ids, dtype=torch.bool)
+    mask.scatter_(1, ids_mask, False)
+    ids_keep = all_ids[mask].view(B, -1)
 
     # Gather visible tokens
-    batch_idx = torch.arange(B).unsqueeze(-1).to(x.device)  # (B, 1)
+    batch_idx = torch.arange(B, device=x.device).unsqueeze(1)
     x_visible = x[batch_idx, ids_keep]
 
     return x_visible, ids_keep, ids_mask
